@@ -1,0 +1,22 @@
+name: Deploy kintone JavaScript customization PoC
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Run deploy command
+        working-directory: kintone-js-oauth-ci-poc
+        run: dotnet run --project src/KintoneJsDeploy.Cli -- deploy
+        env:
+          KINTONE_SUBDOMAIN: ${{ secrets.KINTONE_SUBDOMAIN }}
+          KINTONE_APP_ID: ${{ secrets.KINTONE_APP_ID }}
+          KINTONE_OAUTH_CLIENT_ID: ${{ secrets.KINTONE_OAUTH_CLIENT_ID }}
+          KINTONE_OAUTH_CLIENT_SECRET: ${{ secrets.KINTONE_OAUTH_CLIENT_SECRET }}
+          KINTONE_REFRESH_TOKEN: ${{ secrets.KINTONE_REFRESH_TOKEN }}

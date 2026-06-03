@@ -1,0 +1,14 @@
+# Environment
+.env
+.env.*
+
+# Node and npm artifacts
+node_modules/
+
+# Kintone upload artifacts
+kintone_file_uploads/
+
+# Build outputs
+bin/
+obj/
+publish/

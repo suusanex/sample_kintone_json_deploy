@@ -1,0 +1,19 @@
+{
+  "scope": "ADMIN",
+  "app": "{{APP_ID}}",
+  "desktop": {
+    "js": [
+      {
+        "type": "FILE",
+        "file": {
+          "fileKey": "{{FILE_KEY}}"
+        }
+      }
+    ],
+    "css": []
+  },
+  "mobile": {
+    "js": [],
+    "css": []
+  }
+}
