@@ -26,7 +26,7 @@ internal sealed class FileUploadResponse
 internal sealed class CustomizeUpdateResponse
 {
     [JsonPropertyName("revision")]
-    public int Revision { get; set; }
+    public string Revision { get; set; } = string.Empty;
 }
 
 internal sealed class DeployStatusResponse
@@ -38,7 +38,7 @@ internal sealed class DeployStatusResponse
 internal sealed class DeployStatusItem
 {
     [JsonPropertyName("app")]
-    public int App { get; set; }
+    public string App { get; set; } = string.Empty;
 
     [JsonPropertyName("status")]
     public string Status { get; set; } = string.Empty;

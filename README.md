@@ -51,6 +51,9 @@ Stop-Process -Id <PID> -Force
 
 2. Redirect URI の不一致
    - Kintone 管理画面の登録済み Callback URL と `KINTONE_OAUTH_REDIRECT_URI` が一致しているか再確認（`/oauth` が抜けるとコールバック自体が来ない）
+3. 解析系エラー（`The JSON value could not be converted ...`）
+   - 認証後に `revision` / `apps[].app` 等のレスポンス型が文字列だった場合、これが原因で失敗することがある
+   - 失敗時は `[TRACE]` で当該 `endpoint` とレスポンス本文（先頭）を出すようにしたので、型差分の切り分けがしやすくなった
 
 ## `deploy` で必要な環境変数
 
