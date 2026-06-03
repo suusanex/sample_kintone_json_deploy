@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using KintoneJsDeploy.Cli.Models;
@@ -8,22 +9,26 @@ namespace KintoneJsDeploy.Cli.Services;
 
 internal sealed class OAuthService(HttpClient httpClient)
 {
-    private const string Scope = "k:app_settings:read k:app_settings:write k:file:write";
     private const string AuthorizationEndpointPath = "/oauth2/authorization";
     private readonly HttpClient _httpClient = httpClient;
 
     public string BuildAuthorizationUrl(GetTokenCommandOptions options, string state)
     {
-        var query = new Dictionary<string, string>
-        {
-            ["response_type"] = "code",
-            ["client_id"] = options.ClientId,
-            ["redirect_uri"] = options.RedirectUri.ToString(),
-            ["scope"] = Scope,
-            ["state"] = state
-        };
+        var tenantHost = ResolveTenantHost(options.Subdomain);
+        var encodedScope = WebUtility.UrlEncode(options.Scope);
 
-        return BuildUrl(AuthorizationEndpointPath, options.Subdomain, query);
+        return $"https://{tenantHost}{AuthorizationEndpointPath}" +
+               $"?response_type=code" +
+               $"&client_id={Uri.EscapeDataString(options.ClientId)}" +
+               $"&redirect_uri={Uri.EscapeDataString(options.RedirectUri.ToString())}" +
+               $"&scope={encodedScope}" +
+               $"&state={Uri.EscapeDataString(state)}";
+    }
+
+    public string BuildTokenEndpointUri(string subdomain)
+    {
+        var tenantHost = ResolveTenantHost(subdomain);
+        return $"https://{tenantHost}/oauth2/token";
     }
 
     public async Task<OAuthTokenResponse> ExchangeAuthorizationCodeForAccessTokenAsync(
@@ -64,7 +69,7 @@ internal sealed class OAuthService(HttpClient httpClient)
         Dictionary<string, string> formData,
         CancellationToken cancellationToken)
     {
-        var request = new HttpRequestMessage(HttpMethod.Post, BuildUri(subdomain, "/oauth2/token"))
+        var request = new HttpRequestMessage(HttpMethod.Post, BuildTokenEndpointUri(subdomain))
         {
             Content = new FormUrlEncodedContent(formData)
         };
@@ -95,17 +100,18 @@ internal sealed class OAuthService(HttpClient httpClient)
         return token;
     }
 
-    private static Uri BuildUri(string subdomain, string relativePath)
+    private static string ResolveTenantHost(string subdomainOrHost)
     {
-        return new Uri($"https://{subdomain}.kintone.com{relativePath}");
-    }
+        if (string.IsNullOrWhiteSpace(subdomainOrHost))
+        {
+            throw new ArgumentException("Subdomain or host is required.", nameof(subdomainOrHost));
+        }
 
-    private static string BuildUrl(string relativePath, string subdomain, Dictionary<string, string> query)
-    {
-        var queryText = string.Join(
-            "&",
-            query.Select(pair => $"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value)}"));
+        if (subdomainOrHost.Contains('.', StringComparison.Ordinal))
+        {
+            return subdomainOrHost;
+        }
 
-        return new UriBuilder(BuildUri(subdomain, relativePath)) { Query = queryText }.ToString();
+        return $"{subdomainOrHost}.kintone.com";
     }
 }

@@ -4,7 +4,9 @@ internal sealed record GetTokenCommandOptions(
     string Subdomain,
     string ClientId,
     string ClientSecret,
-    Uri RedirectUri)
+    Uri RedirectUri,
+    string Scope,
+    int TimeoutSeconds)
 {
     public static GetTokenCommandOptions FromEnvironment()
     {
@@ -12,6 +14,10 @@ internal sealed record GetTokenCommandOptions(
         var clientId = GetRequiredEnvironmentVariable("KINTONE_OAUTH_CLIENT_ID");
         var clientSecret = GetRequiredEnvironmentVariable("KINTONE_OAUTH_CLIENT_SECRET");
         var redirectUriValue = GetRequiredEnvironmentVariable("KINTONE_OAUTH_REDIRECT_URI");
+        var scope = GetOptionalEnvironmentVariable("KINTONE_OAUTH_SCOPE") ??
+                    "k:app_settings:read k:app_settings:write k:file:write";
+        var timeoutSeconds = GetOptionalEnvironmentVariable("KINTONE_OAUTH_TIMEOUT_SECONDS");
+        var timeout = string.IsNullOrWhiteSpace(timeoutSeconds) ? 300 : ParsePositiveTimeout(timeoutSeconds);
 
         if (!Uri.TryCreate(redirectUriValue, UriKind.Absolute, out var redirectUri))
         {
@@ -27,7 +33,9 @@ internal sealed record GetTokenCommandOptions(
             subdomain,
             clientId,
             clientSecret,
-            redirectUri);
+            redirectUri,
+            scope,
+            timeout);
     }
 
     private static string GetRequiredEnvironmentVariable(string key)
@@ -39,5 +47,20 @@ internal sealed record GetTokenCommandOptions(
         }
 
         return value;
+    }
+
+    private static string? GetOptionalEnvironmentVariable(string key)
+    {
+        return Environment.GetEnvironmentVariable(key);
+    }
+
+    private static int ParsePositiveTimeout(string value)
+    {
+        if (!int.TryParse(value, out var timeout) || timeout <= 0)
+        {
+            throw new ArgumentException("KINTONE_OAUTH_TIMEOUT_SECONDS must be a positive integer.");
+        }
+
+        return timeout;
     }
 }

@@ -1,164 +1,190 @@
-using System.Net;
-using System.Text;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 
 namespace KintoneJsDeploy.Cli.Services;
 
 internal sealed class LocalOAuthCallbackListener : IDisposable
 {
-    private readonly HttpListener _listener;
+    private readonly Uri _redirectUri;
     private readonly string _expectedPath;
+    private readonly string _expectedSlashPath;
 
     public LocalOAuthCallbackListener(Uri redirectUri)
     {
-        var path = redirectUri.AbsolutePath;
-        _expectedPath = string.IsNullOrEmpty(path) || path == "/" ? "/" : path.TrimEnd('/');
-        var listenerPath = string.IsNullOrEmpty(path) || path == "/" ? "/" : path.TrimEnd('/') + "/";
-
-        _listener = new HttpListener();
-        _listener.Prefixes.Add($"{redirectUri.Scheme}://{redirectUri.Authority}{listenerPath}");
-        if (listenerPath != "/")
-        {
-            _listener.Prefixes.Add($"{redirectUri.Scheme}://{redirectUri.Authority}/");
-        }
+        _redirectUri = redirectUri;
+        var path = string.IsNullOrWhiteSpace(redirectUri.AbsolutePath) ? "/" : redirectUri.AbsolutePath;
+        _expectedPath = path == "/" ? "/" : path.TrimEnd('/');
+        _expectedSlashPath = _expectedPath == "/" ? "/" : $"{_expectedPath}/";
     }
 
     public async Task<string> WaitForCodeAsync(string expectedState, TimeSpan timeout, CancellationToken cancellationToken)
     {
-        _listener.Start();
+        var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
         using var timeoutCts = new CancellationTokenSource(timeout);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
 
+        var builder = WebApplication.CreateSlimBuilder();
+        builder.Logging.ClearProviders();
+
+        builder.WebHost.UseKestrel(kestrelOptions =>
+        {
+            kestrelOptions.ListenLocalhost(_redirectUri.Port, listenOptions =>
+            {
+                if (_redirectUri.Scheme == Uri.UriSchemeHttps)
+                {
+                    try
+                    {
+                        listenOptions.UseHttps();
+                        Console.Error.WriteLine($"[OAuth] HTTPS callback listener configured on port {_redirectUri.Port}.");
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new InvalidOperationException(
+                            "Failed to configure HTTPS callback listener. Run `dotnet dev-certs https --trust` if the development certificate is not trusted.",
+                            ex);
+                    }
+                }
+            });
+        });
+
+        using var app = builder.Build();
+        RegisterCallbackEndpoint(app, tcs, expectedState);
+        var runTask = app.RunAsync(linked.Token);
+        Console.Error.WriteLine($"[OAuth] Callback listener started on {_redirectUri.Scheme}://localhost:{_redirectUri.Port}{_expectedPath}");
+
         try
         {
-            var delayTask = Task.Delay(Timeout.InfiniteTimeSpan, linked.Token);
-            while (true)
+            await Task.Delay(300, linked.Token);
+
+            var completedTask = await Task.WhenAny(tcs.Task, runTask);
+
+            if (completedTask == tcs.Task)
             {
-                var contextTask = _listener.GetContextAsync();
-                var completed = await Task.WhenAny(contextTask, delayTask);
-                if (completed != contextTask)
-                {
-                    throw new TimeoutException("OAuth callback was not received within timeout.");
-                }
-
-                var context = await contextTask;
-                var requestPath = context.Request.Url?.AbsolutePath ?? string.Empty;
-                if (!IsCallbackPath(requestPath))
-                {
-                    await WriteResponseAsync(
-                        context,
-                        "OAuth Skipped",
-                        "This endpoint is not the OAuth callback endpoint.");
-                    continue;
-                }
-
-                var query = ParseQuery(context.Request.Url?.Query);
-                var queryCode = query.GetValueOrDefault("code");
-                var queryState = query.GetValueOrDefault("state");
-                var error = query.GetValueOrDefault("error");
-                var errorDescription = query.GetValueOrDefault("error_description");
-
-                if (!string.IsNullOrEmpty(error))
-                {
-                    await WriteResponseAsync(
-                        context,
-                        "OAuth Failed",
-                        $"OAuth authorization error: {error}. {errorDescription ?? string.Empty}".Trim());
-                    throw new InvalidOperationException(
-                        $"OAuth error response from callback: {error} {errorDescription}");
-                }
-
-                if (string.IsNullOrWhiteSpace(queryCode))
-                {
-                    await WriteResponseAsync(context, "OAuth Failed", "code not found in callback.");
-                    throw new InvalidOperationException("OAuth callback did not include code.");
-                }
-
-                if (!string.Equals(queryState, expectedState, StringComparison.Ordinal))
-                {
-                    await WriteResponseAsync(context, "OAuth Failed", "state verification failed.");
-                    throw new InvalidOperationException("OAuth callback state does not match expected state.");
-                }
-
-                await WriteResponseAsync(context, "OAuth Succeeded", "Authorization completed. You can close this window.");
-                return queryCode;
+                return await tcs.Task;
             }
+
+            if (runTask.IsFaulted)
+            {
+                await runTask;
+            }
+
+            if (linked.Token.IsCancellationRequested)
+            {
+                throw new TimeoutException($"OAuth callback was not received within timeout ({timeout.TotalSeconds:F0}s).");
+            }
+
+            throw new OperationCanceledException("OAuth callback listener was canceled.");
         }
         finally
         {
-            _listener.Stop();
+            try
+            {
+                await app.StopAsync(CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[OAuth] Failed to stop callback listener: {ex}");
+            }
+
+            try
+            {
+                await runTask;
+            }
+            catch (OperationCanceledException)
+            {
+                // expected when listener is stopped by cancellation
+            }
         }
     }
 
     public void Dispose()
     {
-        _listener.Close();
+        // no persistent resources
     }
 
-    private static async Task WriteResponseAsync(HttpListenerContext context, string title, string message)
+    private void RegisterCallbackEndpoint(
+        WebApplication app,
+        TaskCompletionSource<string> tcs,
+        string expectedState)
     {
-        var response = context.Response;
-        response.StatusCode = 200;
-        response.ContentType = "text/html; charset=utf-8";
-        var html = $"""
+        async Task WriteResponse(HttpContext context, int statusCode, string message)
+        {
+            context.Response.StatusCode = statusCode;
+            context.Response.ContentType = "text/html; charset=utf-8";
+            await context.Response.WriteAsync($"""
                     <!doctype html>
                     <html lang="en">
-                      <head><title>{title}</title></head>
-                      <body><h1>{title}</h1><p>{message}</p></body>
+                      <head><title>OAuth</title></head>
+                      <body><h1>OAuth</h1><p>{message}</p></body>
                     </html>
-                    """;
-
-        var bytes = Encoding.UTF8.GetBytes(html);
-        response.ContentLength64 = bytes.Length;
-        await response.OutputStream.WriteAsync(bytes, 0, bytes.Length);
-        response.Close();
-    }
-
-    private bool IsCallbackPath(string requestPath)
-    {
-        if (string.IsNullOrWhiteSpace(requestPath))
-        {
-            return false;
+                    """);
         }
 
-        var normalizedRequestPath = requestPath.EndsWith('/')
-            ? requestPath.TrimEnd('/')
-            : requestPath;
-        if (string.IsNullOrEmpty(normalizedRequestPath))
+        async Task Handler(HttpContext context)
         {
-            normalizedRequestPath = "/";
-        }
-
-        return string.Equals(normalizedRequestPath, _expectedPath, StringComparison.Ordinal);
-    }
-
-    private static Dictionary<string, string> ParseQuery(string? rawQuery)
-    {
-        var result = new Dictionary<string, string>(StringComparer.Ordinal);
-        if (string.IsNullOrWhiteSpace(rawQuery))
-        {
-            return result;
-        }
-
-        if (rawQuery.StartsWith("?"))
-        {
-            rawQuery = rawQuery[1..];
-        }
-
-        var pairs = rawQuery.Split('&', StringSplitOptions.RemoveEmptyEntries);
-        foreach (var pair in pairs)
-        {
-            var index = pair.IndexOf('=');
-            if (index < 0)
+            try
             {
-                result[Uri.UnescapeDataString(pair)] = string.Empty;
-                continue;
-            }
+                Console.Error.WriteLine($"[OAuth] Callback received path={context.Request.Path} query={context.Request.QueryString}");
+                var query = context.Request.Query;
+                var error = query["error"].ToString();
+                var errorDescription = query["error_description"].ToString();
+                var state = query["state"].ToString();
+                var code = query["code"].ToString();
 
-            var key = Uri.UnescapeDataString(pair.Substring(0, index));
-            var value = Uri.UnescapeDataString(pair[(index + 1)..]);
-            result[key] = value;
+                if (!string.IsNullOrEmpty(error))
+                {
+                    var detail = string.IsNullOrWhiteSpace(errorDescription)
+                        ? error
+                        : $"{error}: {errorDescription}";
+                    tcs.TrySetException(new InvalidOperationException($"OAuth authorization error: {detail}"));
+                    await WriteResponse(context, 400, detail);
+                    return;
+                }
+
+                if (!string.Equals(state, expectedState, StringComparison.Ordinal))
+                {
+                    tcs.TrySetException(new InvalidOperationException("OAuth callback state does not match expected value."));
+                    await WriteResponse(context, 400, "OAuth state verification failed.");
+                    return;
+                }
+
+                if (string.IsNullOrWhiteSpace(code))
+                {
+                    tcs.TrySetException(new InvalidOperationException("OAuth callback did not include authorization code."));
+                    await WriteResponse(context, 400, "OAuth code was not found.");
+                    return;
+                }
+
+                if (!tcs.TrySetResult(code))
+                {
+                    Console.Error.WriteLine("[OAuth] Callback code was already handled. Ignore duplicate request.");
+                }
+                await WriteResponse(context, 200, "Authorization completed. You can close this window.");
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
+                try
+                {
+                    await WriteResponse(context, 500, $"OAuth callback failed: {ex.Message}");
+                }
+                catch
+                {
+                    // ignore write failures on callback failure
+                }
+            }
         }
 
-        return result;
+        app.MapGet(_expectedPath, Handler);
+        if (_expectedSlashPath != "/")
+        {
+            app.MapGet(_expectedSlashPath, Handler);
+        }
+
+        app.MapGet("/", static context => context.Response.WriteAsync("OAuth callback is waiting."));
     }
+
 }

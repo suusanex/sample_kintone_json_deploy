@@ -48,17 +48,20 @@ internal sealed class Program
     private static async Task<int> RunGetTokenAsync(CancellationToken cancellationToken)
     {
         var options = GetTokenCommandOptions.FromEnvironment();
+        ThrowIfCallbackPortInUse(options.RedirectUri.Port);
         var state = GenerateState();
         using var httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(2) };
         var oauthService = new OAuthService(httpClient);
         var authUrl = oauthService.BuildAuthorizationUrl(options, state);
+        var timeout = TimeSpan.FromSeconds(options.TimeoutSeconds);
 
         Console.WriteLine("Open the following URL and allow the application:");
         Console.WriteLine(authUrl);
-        TryOpenBrowser(authUrl);
 
         using var callbackListener = new LocalOAuthCallbackListener(options.RedirectUri);
-        var authorizationCode = await callbackListener.WaitForCodeAsync(state, TimeSpan.FromMinutes(5), cancellationToken);
+        var waitTask = callbackListener.WaitForCodeAsync(state, timeout, cancellationToken);
+        TryOpenBrowser(authUrl);
+        var authorizationCode = await waitTask;
 
         var token = await oauthService.ExchangeAuthorizationCodeForAccessTokenAsync(
             options,
@@ -261,5 +264,127 @@ internal sealed class Program
         }
 
         return value;
+    }
+
+    private static void ThrowIfCallbackPortInUse(int port)
+    {
+        var listeners = GetListeningPidsForPort(port);
+        if (listeners.Count == 0)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"Local callback port {port} is already in use. " +
+            $"Possible leftover OAuth listener processes: {string.Join(", ", listeners)}. " +
+            "Stop previous get-token flow and retry.");
+    }
+
+    private static IReadOnlyCollection<int> GetListeningPidsForPort(int port)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "netstat",
+                Arguments = "-ano -p TCP",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            using var process = Process.Start(psi);
+            if (process is null)
+            {
+                return Array.Empty<int>();
+            }
+
+            var output = process.StandardOutput.ReadToEnd();
+            var error = process.StandardError.ReadToEnd();
+            process.WaitForExit(3000);
+
+            if (process.ExitCode != 0)
+            {
+                Console.Error.WriteLine($"[OAuth] netstat returned non-zero status: {error}");
+                return Array.Empty<int>();
+            }
+
+            var lines = output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+            return lines
+                .Select(line => line.Trim())
+                .Where(line => line.StartsWith("TCP", StringComparison.OrdinalIgnoreCase))
+                .Select(ParseListeningPortAndPidFromNetstatLine)
+                .Where(x => x is not null && x.Value.port == port && x.Value.pid != 0)
+                .Select(x => x!.Value.pid)
+                .Distinct()
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[OAuth] Failed to inspect local ports: {ex.Message}");
+            return Array.Empty<int>();
+        }
+    }
+
+    private static (int pid, int port)? ParseListeningPortAndPidFromNetstatLine(string line)
+    {
+        try
+        {
+            var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 5 || !string.Equals(parts[3], "LISTENING", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            var localPort = ExtractPort(parts[1]);
+            if (string.IsNullOrWhiteSpace(localPort))
+            {
+                return null;
+            }
+
+            if (!int.TryParse(localPort, out var port))
+            {
+                return null;
+            }
+
+            if (!int.TryParse(parts[^1], out var pid))
+            {
+                return null;
+            }
+
+            return (pid, port);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? ExtractPort(string endpoint)
+    {
+        if (string.IsNullOrWhiteSpace(endpoint))
+        {
+            return null;
+        }
+
+        if (endpoint.StartsWith("["))
+        {
+            var close = endpoint.IndexOf(']');
+            if (close < 0 || close + 2 > endpoint.Length)
+            {
+                return null;
+            }
+
+            return endpoint[(close + 2)..];
+        }
+
+        var colon = endpoint.LastIndexOf(':');
+        if (colon < 0 || colon + 1 >= endpoint.Length)
+        {
+            return null;
+        }
+
+        return endpoint[(colon + 1)..];
     }
 }
