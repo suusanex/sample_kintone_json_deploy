@@ -38,7 +38,7 @@ internal sealed class LocalOAuthCallbackListener : IDisposable
                     try
                     {
                         listenOptions.UseHttps();
-                        Console.Error.WriteLine($"[OAuth] HTTPS callback listener configured on port {_redirectUri.Port}.");
+                        WriteOAuthLog($"HTTPS callback listener configured on port {_redirectUri.Port}.");
                     }
                     catch (Exception ex)
                     {
@@ -53,7 +53,10 @@ internal sealed class LocalOAuthCallbackListener : IDisposable
         using var app = builder.Build();
         RegisterCallbackEndpoint(app, tcs, expectedState);
         var runTask = app.RunAsync(linked.Token);
-        Console.Error.WriteLine($"[OAuth] Callback listener started on {_redirectUri.Scheme}://localhost:{_redirectUri.Port}{_expectedPath}");
+        WriteOAuthLog($"Callback listener started on {_redirectUri.Scheme}://localhost:{_redirectUri.Port}{_expectedPath}");
+        WriteOAuthLog(
+            "Callback diagnostics: if the browser shows an error before a 'Callback received' line appears, " +
+            "the failure happened before kintone redirected to the local listener. Check the kintone OAuth client, callback URL, scope, and authorization page error.");
 
         try
         {
@@ -73,6 +76,9 @@ internal sealed class LocalOAuthCallbackListener : IDisposable
 
             if (linked.Token.IsCancellationRequested)
             {
+                WriteOAuthLog(
+                    $"OAuth callback was not received within timeout ({timeout.TotalSeconds:F0}s). " +
+                    "No request reached the local callback endpoint. If the browser showed HTTP ERROR 500 without a 'Callback received' log, inspect kintone OAuth settings.");
                 throw new TimeoutException($"OAuth callback was not received within timeout ({timeout.TotalSeconds:F0}s).");
             }
 
@@ -86,7 +92,7 @@ internal sealed class LocalOAuthCallbackListener : IDisposable
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[OAuth] Failed to stop callback listener: {ex}");
+                WriteOAuthLog("Failed to stop callback listener: " + ex.ToString());
             }
 
             try
@@ -127,7 +133,7 @@ internal sealed class LocalOAuthCallbackListener : IDisposable
         {
             try
             {
-                Console.Error.WriteLine($"[OAuth] Callback received path={context.Request.Path} query={context.Request.QueryString}");
+                WriteOAuthLog($"Callback received path={context.Request.Path} {FormatQueryDiagnostics(context)}");
                 var query = context.Request.Query;
                 var error = query["error"].ToString();
                 var errorDescription = query["error_description"].ToString();
@@ -139,6 +145,7 @@ internal sealed class LocalOAuthCallbackListener : IDisposable
                     var detail = string.IsNullOrWhiteSpace(errorDescription)
                         ? error
                         : $"{error}: {errorDescription}";
+                    WriteOAuthLog($"Authorization endpoint returned error: {detail}");
                     tcs.TrySetException(new InvalidOperationException($"OAuth authorization error: {detail}"));
                     await WriteResponse(context, 400, detail);
                     return;
@@ -146,6 +153,9 @@ internal sealed class LocalOAuthCallbackListener : IDisposable
 
                 if (!string.Equals(state, expectedState, StringComparison.Ordinal))
                 {
+                    WriteOAuthLog(
+                        $"State mismatch. expectedLength={expectedState.Length} actualLength={state.Length} " +
+                        $"actualStatePresent={!string.IsNullOrWhiteSpace(state)}");
                     tcs.TrySetException(new InvalidOperationException("OAuth callback state does not match expected value."));
                     await WriteResponse(context, 400, "OAuth state verification failed.");
                     return;
@@ -153,6 +163,7 @@ internal sealed class LocalOAuthCallbackListener : IDisposable
 
                 if (string.IsNullOrWhiteSpace(code))
                 {
+                    WriteOAuthLog("Callback did not include authorization code.");
                     tcs.TrySetException(new InvalidOperationException("OAuth callback did not include authorization code."));
                     await WriteResponse(context, 400, "OAuth code was not found.");
                     return;
@@ -160,12 +171,13 @@ internal sealed class LocalOAuthCallbackListener : IDisposable
 
                 if (!tcs.TrySetResult(code))
                 {
-                    Console.Error.WriteLine("[OAuth] Callback code was already handled. Ignore duplicate request.");
+                    WriteOAuthLog("Callback code was already handled. Ignore duplicate request.");
                 }
                 await WriteResponse(context, 200, "Authorization completed. You can close this window.");
             }
             catch (Exception ex)
             {
+                WriteOAuthLog("Callback handler failed: " + ex.ToString());
                 tcs.TrySetException(ex);
                 try
                 {
@@ -184,7 +196,47 @@ internal sealed class LocalOAuthCallbackListener : IDisposable
             app.MapGet(_expectedSlashPath, Handler);
         }
 
-        app.MapGet("/", static context => context.Response.WriteAsync("OAuth callback is waiting."));
+        app.MapGet("/", context =>
+        {
+            WriteOAuthLog("Root path requested. The listener is alive, but this is not the configured OAuth callback path.");
+            return context.Response.WriteAsync("OAuth callback is waiting.");
+        });
+
+        app.MapFallback(context =>
+        {
+            WriteOAuthLog(
+                $"Unexpected callback path requested. path={context.Request.Path} {FormatQueryDiagnostics(context)} " +
+                $"expectedPath={_expectedPath}");
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return context.Response.WriteAsync($"Unexpected OAuth callback path. Expected '{_expectedPath}'.");
+        });
     }
 
+    private static string FormatQueryDiagnostics(HttpContext context)
+    {
+        var query = context.Request.Query;
+        var error = query["error"].ToString();
+        var errorDescription = query["error_description"].ToString();
+        var state = query["state"].ToString();
+        var code = query["code"].ToString();
+
+        return
+            $"queryDiagnostics=errorPresent={!string.IsNullOrWhiteSpace(error)} " +
+            $"error={FormatOptionalValue(error)} " +
+            $"errorDescription={FormatOptionalValue(errorDescription)} " +
+            $"statePresent={!string.IsNullOrWhiteSpace(state)} stateLength={state.Length} " +
+            $"codePresent={!string.IsNullOrWhiteSpace(code)} codeLength={code.Length}";
+    }
+
+    private static string FormatOptionalValue(string value)
+    {
+        return string.IsNullOrWhiteSpace(value) ? "<empty>" : value;
+    }
+
+    private static void WriteOAuthLog(string message)
+    {
+        var line = $"[OAuth] {message}";
+        Console.WriteLine(line);
+        Console.Error.WriteLine(line);
+    }
 }
