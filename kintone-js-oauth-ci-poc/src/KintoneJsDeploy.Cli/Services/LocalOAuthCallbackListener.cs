@@ -9,14 +9,12 @@ internal sealed class LocalOAuthCallbackListener : IDisposable
 {
     private readonly Uri _redirectUri;
     private readonly string _expectedPath;
-    private readonly string _expectedSlashPath;
 
     public LocalOAuthCallbackListener(Uri redirectUri)
     {
         _redirectUri = redirectUri;
         var path = string.IsNullOrWhiteSpace(redirectUri.AbsolutePath) ? "/" : redirectUri.AbsolutePath;
         _expectedPath = path == "/" ? "/" : path.TrimEnd('/');
-        _expectedSlashPath = _expectedPath == "/" ? "/" : $"{_expectedPath}/";
     }
 
     public async Task<string> WaitForCodeAsync(string expectedState, TimeSpan timeout, CancellationToken cancellationToken)
@@ -51,6 +49,7 @@ internal sealed class LocalOAuthCallbackListener : IDisposable
         });
 
         using var app = builder.Build();
+        RegisterRequestDiagnostics(app);
         RegisterCallbackEndpoint(app, tcs, expectedState);
         var runTask = app.RunAsync(linked.Token);
         WriteOAuthLog($"Callback listener started on {_redirectUri.Scheme}://localhost:{_redirectUri.Port}{_expectedPath}");
@@ -133,8 +132,8 @@ internal sealed class LocalOAuthCallbackListener : IDisposable
         {
             try
             {
-                WriteOAuthLog($"Callback received path={context.Request.Path} {FormatQueryDiagnostics(context)}");
-                var query = context.Request.Query;
+                WriteOAuthLog($"Callback received path={context.Request.Path} rawQueryLength={context.Request.QueryString.Value?.Length ?? 0}");
+                var query = ReadQueryWithDiagnostics(context);
                 var error = query["error"].ToString();
                 var errorDescription = query["error_description"].ToString();
                 var state = query["state"].ToString();
@@ -191,30 +190,67 @@ internal sealed class LocalOAuthCallbackListener : IDisposable
         }
 
         app.MapGet(_expectedPath, Handler);
-        if (_expectedSlashPath != "/")
-        {
-            app.MapGet(_expectedSlashPath, Handler);
-        }
 
         app.MapGet("/", context =>
         {
             WriteOAuthLog("Root path requested. The listener is alive, but this is not the configured OAuth callback path.");
             return context.Response.WriteAsync("OAuth callback is waiting.");
         });
+    }
 
-        app.MapFallback(context =>
+    private static void RegisterRequestDiagnostics(WebApplication app)
+    {
+        app.Use(async (context, next) =>
         {
             WriteOAuthLog(
-                $"Unexpected callback path requested. path={context.Request.Path} {FormatQueryDiagnostics(context)} " +
-                $"expectedPath={_expectedPath}");
-            context.Response.StatusCode = StatusCodes.Status404NotFound;
-            return context.Response.WriteAsync($"Unexpected OAuth callback path. Expected '{_expectedPath}'.");
+                $"Request pipeline entered. method={context.Request.Method} scheme={context.Request.Scheme} " +
+                $"host={context.Request.Host} path={context.Request.Path} rawQueryLength={context.Request.QueryString.Value?.Length ?? 0}");
+
+            try
+            {
+                await next(context);
+                WriteOAuthLog(
+                    $"Request pipeline completed. method={context.Request.Method} path={context.Request.Path} " +
+                    $"statusCode={context.Response.StatusCode}");
+            }
+            catch (Exception ex)
+            {
+                WriteOAuthLog("Request pipeline failed: " + ex.ToString());
+                throw;
+            }
         });
+    }
+
+    private static IQueryCollection ReadQueryWithDiagnostics(HttpContext context)
+    {
+        try
+        {
+            var query = context.Request.Query;
+            WriteOAuthLog(FormatQueryDiagnostics(query));
+            return query;
+        }
+        catch (Exception ex)
+        {
+            WriteOAuthLog(
+                $"Query parse failed. rawQueryLength={context.Request.QueryString.Value?.Length ?? 0} exception={ex}");
+            throw;
+        }
     }
 
     private static string FormatQueryDiagnostics(HttpContext context)
     {
-        var query = context.Request.Query;
+        try
+        {
+            return FormatQueryDiagnostics(context.Request.Query);
+        }
+        catch (Exception ex)
+        {
+            return $"queryDiagnostics=parseFailed rawQueryLength={context.Request.QueryString.Value?.Length ?? 0} exception={ex.GetType().Name}: {ex.Message}";
+        }
+    }
+
+    private static string FormatQueryDiagnostics(IQueryCollection query)
+    {
         var error = query["error"].ToString();
         var errorDescription = query["error_description"].ToString();
         var state = query["state"].ToString();
@@ -235,8 +271,6 @@ internal sealed class LocalOAuthCallbackListener : IDisposable
 
     private static void WriteOAuthLog(string message)
     {
-        var line = $"[OAuth] {message}";
-        Console.WriteLine(line);
-        Console.Error.WriteLine(line);
+        Console.WriteLine($"[OAuth] {message}");
     }
 }

@@ -172,7 +172,10 @@ internal sealed class Program
     {
         var bytes = new byte[32];
         RandomNumberGenerator.Fill(bytes);
-        return Convert.ToBase64String(bytes);
+        return Convert.ToBase64String(bytes)
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
     }
 
     private static void TryOpenBrowser(string url)
