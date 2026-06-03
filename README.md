@@ -1,5 +1,22 @@
 # sample_kintone_json_deploy
 
+## 調査結果の結論
+
+`kintone_js_oauth_ci_experiment.md` の最小実験として、初回の `get-token` で取得した値を `.env` の `KINTONE_REFRESH_TOKEN` に入れた状態で、`.env` に `KINTONE_OAUTH_CLIENT_ID`、`KINTONE_OAUTH_CLIENT_SECRET`、`KINTONE_OAUTH_REDIRECT_URI` を入れずに `deploy` を実行した。
+
+結果として、ブラウザでのOAuth認可を求められることなく `deploy completed.` まで完了し、kintoneアプリの管理画面「JavaScript / CSSでカスタマイズ」でも対象JavaScriptが登録されていることを確認できた。
+
+この結果により、少なくともこのPoCの `deploy` 実装では、初回認可で得たrefresh tokenを保存しておけば、2回目以降のJavaScriptカスタマイズ反映をブラウザ再認可なしで実行できることを確認できた。つまり、実験で検証したかった「初回だけ管理者がOAuth認可し、以後はrefresh tokenを使ってJavaScriptカスタマイズを自動反映する」という中心仮説は、ローカル実行の範囲では成立している。
+
+また、kintone管理画面上でJavaScript登録まで確認できているため、単にトークン更新だけが成功したのではなく、少なくとも次の一連の処理が実際に成立したと判断できる。
+
+- refresh tokenを使ったdeploy処理の実行
+- JavaScriptファイルのkintone側への登録
+- アプリのJavaScript / CSSカスタマイズ設定への反映
+- 反映後のdeploy完了
+
+一方で、この確認だけではGitHub ActionsなどのCI環境で同じ設定が成立することまではまだ証明していない。CI/CDでの利用可否は、同じSecret構成をGitHub Actionsへ設定して別途実行確認する必要がある。
+
 このリポジトリでは、kintone の JavaScript カスタマイズを
 管理者 OAuth（refresh token）を使ってデプロイする最小実験の PoC を実装する。
 
