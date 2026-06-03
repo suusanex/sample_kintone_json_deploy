@@ -6,17 +6,20 @@ namespace KintoneJsDeploy.Cli.Services;
 internal sealed class LocalOAuthCallbackListener : IDisposable
 {
     private readonly HttpListener _listener;
+    private readonly string _expectedPath;
 
     public LocalOAuthCallbackListener(Uri redirectUri)
     {
         var path = redirectUri.AbsolutePath;
-        if (!path.EndsWith('/'))
-        {
-            path += "/";
-        }
+        _expectedPath = string.IsNullOrEmpty(path) || path == "/" ? "/" : path.TrimEnd('/');
+        var listenerPath = string.IsNullOrEmpty(path) || path == "/" ? "/" : path.TrimEnd('/') + "/";
 
         _listener = new HttpListener();
-        _listener.Prefixes.Add($"{redirectUri.Scheme}://{redirectUri.Authority}{path}");
+        _listener.Prefixes.Add($"{redirectUri.Scheme}://{redirectUri.Authority}{listenerPath}");
+        if (listenerPath != "/")
+        {
+            _listener.Prefixes.Add($"{redirectUri.Scheme}://{redirectUri.Authority}/");
+        }
     }
 
     public async Task<string> WaitForCodeAsync(string expectedState, TimeSpan timeout, CancellationToken cancellationToken)
@@ -38,6 +41,16 @@ internal sealed class LocalOAuthCallbackListener : IDisposable
                 }
 
                 var context = await contextTask;
+                var requestPath = context.Request.Url?.AbsolutePath ?? string.Empty;
+                if (!IsCallbackPath(requestPath))
+                {
+                    await WriteResponseAsync(
+                        context,
+                        "OAuth Skipped",
+                        "This endpoint is not the OAuth callback endpoint.");
+                    continue;
+                }
+
                 var query = ParseQuery(context.Request.Url?.Query);
                 var queryCode = query.GetValueOrDefault("code");
                 var queryState = query.GetValueOrDefault("state");
@@ -98,6 +111,24 @@ internal sealed class LocalOAuthCallbackListener : IDisposable
         response.ContentLength64 = bytes.Length;
         await response.OutputStream.WriteAsync(bytes, 0, bytes.Length);
         response.Close();
+    }
+
+    private bool IsCallbackPath(string requestPath)
+    {
+        if (string.IsNullOrWhiteSpace(requestPath))
+        {
+            return false;
+        }
+
+        var normalizedRequestPath = requestPath.EndsWith('/')
+            ? requestPath.TrimEnd('/')
+            : requestPath;
+        if (string.IsNullOrEmpty(normalizedRequestPath))
+        {
+            normalizedRequestPath = "/";
+        }
+
+        return string.Equals(normalizedRequestPath, _expectedPath, StringComparison.Ordinal);
     }
 
     private static Dictionary<string, string> ParseQuery(string? rawQuery)

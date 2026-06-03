@@ -9,6 +9,7 @@ namespace KintoneJsDeploy.Cli.Services;
 internal sealed class OAuthService(HttpClient httpClient)
 {
     private const string Scope = "k:app_settings:read k:app_settings:write k:file:write";
+    private const string AuthorizationEndpointPath = "/oauth2/authorization";
     private readonly HttpClient _httpClient = httpClient;
 
     public string BuildAuthorizationUrl(GetTokenCommandOptions options, string state)
@@ -22,7 +23,7 @@ internal sealed class OAuthService(HttpClient httpClient)
             ["state"] = state
         };
 
-        return BuildUrl($"/oauth2/authorize", options.Subdomain, query);
+        return BuildUrl(AuthorizationEndpointPath, options.Subdomain, query);
     }
 
     public async Task<OAuthTokenResponse> ExchangeAuthorizationCodeForAccessTokenAsync(
